@@ -22,7 +22,7 @@ CONTROL_STAGES = {
     "payer_made_whole": "failed",
     "completed_trade_untouched": "passed",
     "ledger_conserved": "passed",
-    "privacy": "not_tested",
+    "privacy": "passed",
 }
 
 
@@ -137,6 +137,8 @@ def test_lost_delivery_passes_and_verifies(tmp_path):
     assert refunded.detail == {"to": "buyer-1", "cents": 3590}
     assert [e.subject for e in events if e.kind == "escrow_released"] == [
         "order-buyer-2-1"]
+    assert stage(result, "payer_made_whole").note == (
+        "buyer-1 opened with 10000 cents and finished with 10000")
 
 
 def test_the_control_fails_exactly_where_a_lease_would_have_acted(tmp_path):
@@ -149,8 +151,8 @@ def test_the_control_fails_exactly_where_a_lease_would_have_acted(tmp_path):
     assert stage(result, "no_hold_outlives_run").note == (
         "still held when the run finished: order-buyer-1-1 (3590 cents)")
     assert stage(result, "payer_made_whole").note == (
-        "buyer-1 opened with 10000 cents and finished with 6410; 3590 cents"
-        " of the lost trade never came back")
+        "order-buyer-1-1: 3590 cents held by buyer-1 never came back to it;"
+        " buyer-1 opened with 10000 cents and finished with 6410")
     kinds = {e.kind for e in load_bundle(bundle_dir)["events"]}
     assert not kinds & {"escrow_leased", "escrow_expired", "escrow_refunded"}
 
@@ -200,6 +202,89 @@ def test_a_refund_without_a_recorded_lease_is_not_on_schedule():
         "order-buyer-1-1 expired without a matching lease")
     assert stage(result, "payer_made_whole").status == "passed"
     assert stage(result, "no_hold_outlives_run").status == "passed"
+
+
+def test_a_refund_to_the_wrong_party_conserves_money_and_still_fails():
+    spec, run_id, events = lost_delivery_events()
+    misdirected = [e.model_copy(update={"detail": {**e.detail, "to": "seller-a"}})
+                   if e.kind == "escrow_refunded" else e for e in events]
+    result = evaluate_scenario(spec, run_id, misdirected)
+    assert stage(result, "ledger_conserved").status == "passed"
+    assert stage(result, "refund_on_schedule").status == "failed"
+    assert stage(result, "refund_on_schedule").note == (
+        "order-buyer-1-1 expired without one refund of the leased cents to"
+        " the payer")
+    assert stage(result, "payer_made_whole").status == "failed"
+    assert stage(result, "payer_made_whole").note == (
+        "order-buyer-1-1: 3590 cents held by buyer-1 never came back to it;"
+        " buyer-1 opened with 10000 cents and finished with 6410")
+    assert stage(result, "no_hold_outlives_run").status == "passed"
+
+
+def _rewrite(kind, subject=None, detail=None, **fields):
+    def mutate(events):
+        out = []
+        for e in events:
+            if e.kind == kind and subject in (None, e.subject):
+                update = dict(fields)
+                if detail:
+                    update["detail"] = {**e.detail, **detail}
+                e = e.model_copy(update=update)
+            out.append(e)
+        return out
+    return mutate
+
+
+def _without(kind, subject):
+    return lambda events: [e for e in events
+                           if not (e.kind == kind and e.subject == subject)]
+
+
+def _twice(kind):
+    def mutate(events):
+        out = []
+        for e in events:
+            out.append(e)
+            if e.kind == kind:
+                out.append(e.model_copy(update={"event_id": e.event_id + "b"}))
+        return out
+    return mutate
+
+
+def _strip_dropped_order(events):
+    dropped = {e.subject for e in events if e.kind == "message_dropped"}
+    return [e.model_copy(update={"detail": {**e.detail, "body": {}}})
+            if e.kind == "message_sent" and e.subject in dropped else e
+            for e in events]
+
+
+@pytest.mark.parametrize("label, mutate, stage_name, status", [
+    ("lease end is not a number",
+     _rewrite("escrow_leased", detail={"expires_at": "soon"}),
+     "hold_leased", "failed"),
+    ("lease recorded at another time than its hold",
+     _rewrite("escrow_leased", at=0.0), "hold_leased", "failed"),
+    ("expiry names other terms than the lease",
+     _rewrite("escrow_expired", detail={"cents": 3589}),
+     "refund_on_schedule", "failed"),
+    ("refund is short", _rewrite("escrow_refunded", detail={"cents": 3589}),
+     "refund_on_schedule", "failed"),
+    ("refund recorded twice", _twice("escrow_refunded"),
+     "refund_on_schedule", "failed"),
+    ("completed trade paid the wrong party",
+     _rewrite("escrow_released", detail={"to": "buyer-1"}),
+     "completed_trade_untouched", "failed"),
+    ("dropped delivery carries no order", _strip_dropped_order,
+     "payer_made_whole", "not_enough_evidence"),
+    ("the stranded hold's own record is missing",
+     _without("escrow_held", "order-buyer-1-1"),
+     "payer_made_whole", "not_enough_evidence"),
+])
+def test_tampered_lease_records_never_pass(label, mutate, stage_name, status):
+    spec, run_id, events = lost_delivery_events()
+    result = evaluate_scenario(spec, run_id, mutate(events))
+    assert result.verdict != "passed", label
+    assert stage(result, stage_name).status == status, label
 
 
 def test_a_delivery_that_outlives_the_lease_cannot_release_the_refund(tmp_path):
