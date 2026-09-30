@@ -309,6 +309,55 @@ def test_a_delivery_that_outlives_the_lease_cannot_release_the_refund(tmp_path):
     assert ledger_conserved(Trace(engine.events)).status == "passed"
 
 
+def _lease_plugin(tmp_path, lease):
+    path = tmp_path / "short_lease.py"
+    path.write_text(
+        "from nandatown.layers import register\n"
+        "from nandatown.layers.payments import LeasedLedger\n\n\n"
+        '@register("payments", "leased.short.v1")\n'
+        "class ShortLease(LeasedLedger):\n"
+        f"    LEASE = {lease}\n")
+    return str(path)
+
+
+def test_a_scenario_can_bring_its_own_lease_through_a_plugin_file(tmp_path):
+    plugin = _lease_plugin(tmp_path, 1.0)
+    bundle_dir, result = run_lab(
+        "lost_delivery", str(tmp_path / "runs"), plugins=[plugin],
+        layer_overrides={"payments": "leased.short.v1"})
+    assert result.verdict == "passed", stages(result)
+    assert verify_bundle(bundle_dir) == []
+    bundle = load_bundle(bundle_dir)
+    lease = next(e for e in bundle["events"] if e.kind == "escrow_leased")
+    expired = next(e for e in bundle["events"] if e.kind == "escrow_expired")
+    assert lease.detail["expires_at"] == lease.at + 1.0
+    assert expired.at == lease.at + 1.0
+    assert bundle["run"].config["layers"]["payments"] == "leased.short.v1"
+    assert bundle["run"].config["rerun_command"].endswith(
+        f"--plugin {plugin} --layer payments=leased.short.v1")
+
+
+def test_a_lease_shorter_than_an_honest_delivery_fails_the_completed_trade(tmp_path):
+    plugin = _lease_plugin(tmp_path, 0.1)
+    bundle_dir, result = run_lab(
+        "lost_delivery", str(tmp_path / "runs"), plugins=[plugin],
+        layer_overrides={"payments": "leased.short.v1"})
+    assert result.verdict == "failed"
+    assert stages(result) == {
+        "delivery_dropped": "passed", "hold_leased": "passed",
+        "refund_on_schedule": "passed", "no_hold_outlives_run": "passed",
+        "payer_made_whole": "passed", "completed_trade_untouched": "failed",
+        "ledger_conserved": "passed", "privacy": "passed"}
+    assert stage(result, "completed_trade_untouched").note == (
+        "a completed trade did not pay its seller once and only once:"
+        " order-buyer-2-1")
+    events = load_bundle(bundle_dir)["events"]
+    rejected = [e for e in events if e.kind == "escrow_release_rejected"]
+    assert [r.subject for r in rejected] == ["order-buyer-2-1"]
+    assert not [e for e in events if e.kind == "payment_settled"]
+    assert verify_bundle(bundle_dir) == []
+
+
 @pytest.mark.parametrize("name",
                          [n for n in ALL_SCENARIOS if n != "lost_delivery"])
 def test_leased_ledger_is_a_drop_in_for_the_bundled_scenarios(name, tmp_path):
