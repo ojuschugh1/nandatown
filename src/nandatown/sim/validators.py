@@ -1117,6 +1117,7 @@ def lost_delivery(spec, trace: Trace) -> list[StageResult]:
         expires_at = (found[0].detail.get("expires_at")
                       if len(found) == 1 else None)
         if not (len(found) == 1
+                and hold.observer == "town"
                 and found[0].observer == "town"
                 and found[0].at == hold.at
                 and found[0].detail.get("from") == hold.detail.get("from")
@@ -1152,6 +1153,8 @@ def lost_delivery(spec, trace: Trace) -> list[StageResult]:
                                 for k in ("from", "cents", "expires_at")):
                 problems.append(f"{ref} expired without a matching lease")
                 continue
+            if event.observer != "town":
+                problems.append(f"{ref} expiry was not recorded by the town")
             if event.at != terms["expires_at"]:
                 problems.append(f"{ref} expired at {event.at}, not at its"
                                 f" lease end {terms['expires_at']}")
@@ -1159,6 +1162,7 @@ def lost_delivery(spec, trace: Trace) -> list[StageResult]:
                 problems.append(f"{ref} was released and still expired")
             refund = refunds[0] if len(refunds) == 1 else None
             if (refund is None
+                    or refund.observer != "town"
                     or trace.index(refund) < trace.index(event)
                     or refund.at != event.at
                     or refund.detail.get("to") != terms["from"]
@@ -1176,8 +1180,10 @@ def lost_delivery(spec, trace: Trace) -> list[StageResult]:
                                "no completed run with escrow holds to judge"))
     else:
         end = trace.index(finished[-1])
-        settled = {e.subject for e in trace.find("escrow_released")
-                   + trace.find("escrow_refunded") if trace.index(e) < end}
+        settled = {e.subject
+                   for e in (trace.find("escrow_released", observer="town")
+                             + trace.find("escrow_refunded", observer="town"))
+                   if trace.index(e) < end}
         stranded = [h for h in held if h.subject not in settled]
         stages.append(_check(
             "no_hold_outlives_run", not stranded,
@@ -1208,6 +1214,7 @@ def lost_delivery(spec, trace: Trace) -> list[StageResult]:
                 balances.append(f"{payer} opened with {opened} cents and"
                                 f" finished with {closing}")
             if (len(refunds) != 1
+                    or refunds[0].observer != "town"
                     or refunds[0].detail.get("to") != payer
                     or refunds[0].detail.get("cents") != hold.detail.get("cents")
                     or trace.find("escrow_released", subject=ref)):
@@ -1239,6 +1246,7 @@ def lost_delivery(spec, trace: Trace) -> list[StageResult]:
             evidence += ([hold.event_id] + _event_ids(released)
                          + _event_ids(interfered))
             if (len(released) != 1 or interfered
+                    or released[0].observer != "town"
                     or released[0].detail.get("to") != sellers[ref]
                     or released[0].detail.get("cents") != hold.detail.get("cents")):
                 touched.append(ref)
