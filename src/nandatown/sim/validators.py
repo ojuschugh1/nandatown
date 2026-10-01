@@ -1102,7 +1102,7 @@ def lost_delivery(spec, trace: Trace) -> list[StageResult]:
     complete must be left alone. These are correlated Lab records: they
     do not show that goods existed or that either side was honest."""
     stages = []
-    dropped = trace.find("message_dropped", kind="delivery")
+    dropped = trace.find("message_dropped", observer="town", kind="delivery")
     stages.append(_check(
         "delivery_dropped", bool(dropped), _event_ids(dropped),
         "the scenario must drop a delivery message"))
@@ -1129,13 +1129,18 @@ def lost_delivery(spec, trace: Trace) -> list[StageResult]:
             unleased.append(hold.subject)
         else:
             leased_until.append(f"{hold.subject} until {expires_at}")
-    stages.append(_check(
-        "hold_leased", not unleased,
-        _event_ids(held) + _event_ids([e for group in leases.values()
-                                       for e in group]),
-        f"{len(unleased)} of {len(held)} holds carry no lease:"
-        f" {', '.join(unleased)}",
-        "leased " + ", ".join(leased_until)))
+    if not held:
+        stages.append(_missing("hold_leased",
+                               "no escrow hold was recorded, so there is no"
+                               " lease to check"))
+    else:
+        stages.append(_check(
+            "hold_leased", not unleased,
+            _event_ids(held) + _event_ids([e for group in leases.values()
+                                           for e in group]),
+            f"{len(unleased)} of {len(held)} holds carry no lease:"
+            f" {', '.join(unleased)}",
+            "leased " + ", ".join(leased_until)))
 
     expired = trace.find("escrow_expired")
     if not expired:
@@ -1234,7 +1239,8 @@ def lost_delivery(spec, trace: Trace) -> list[StageResult]:
             "payer_made_whole", not short, evidence,
             "; ".join(short + balances), "; ".join(balances)))
 
-    delivered = trace.find("message_delivered", kind="delivery")
+    delivered = trace.find("message_delivered", observer="town",
+                           kind="delivery")
     sellers = {ref: seller for ref, seller
                in _delivery_senders(trace, delivered).items()
                if ref not in lost_refs}
