@@ -139,6 +139,14 @@ def test_lost_delivery_passes_and_verifies(tmp_path):
         "order-buyer-2-1"]
     assert stage(result, "payer_made_whole").note == (
         "buyer-1 opened with 10000 cents and finished with 10000")
+    assert stage(result, "hold_leased").note == (
+        "leased order-buyer-1-1 until 6.7, order-buyer-2-1 until 6.7")
+    assert stage(result, "refund_on_schedule").note == (
+        "order-buyer-1-1 expired at 6.7 and refunded 3590 cents to buyer-1")
+    assert stage(result, "no_hold_outlives_run").note == (
+        "2 holds settled before the run finished: 1 released, 1 refunded")
+    assert stage(result, "completed_trade_untouched").note == (
+        "order-buyer-2-1 paid 3590 cents to seller-a once")
 
 
 def test_the_control_fails_exactly_where_a_lease_would_have_acted(tmp_path):

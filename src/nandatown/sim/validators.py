@@ -1112,6 +1112,7 @@ def lost_delivery(spec, trace: Trace) -> list[StageResult]:
     for lease in trace.find("escrow_leased"):
         leases.setdefault(lease.subject, []).append(lease)
     unleased = []
+    leased_until = []
     for hold in held:
         found = leases.get(hold.subject, [])
         expires_at = (found[0].detail.get("expires_at")
@@ -1126,13 +1127,15 @@ def lost_delivery(spec, trace: Trace) -> list[StageResult]:
                 and math.isfinite(expires_at)
                 and expires_at > hold.at):
             unleased.append(hold.subject)
+        else:
+            leased_until.append(f"{hold.subject} until {expires_at}")
     stages.append(_check(
         "hold_leased", not unleased,
         _event_ids(held) + _event_ids([e for group in leases.values()
                                        for e in group]),
         f"{len(unleased)} of {len(held)} holds carry no lease:"
         f" {', '.join(unleased)}",
-        "every hold recorded the lease it would refund under"))
+        "leased " + ", ".join(leased_until)))
 
     expired = trace.find("escrow_expired")
     if not expired:
@@ -1142,6 +1145,7 @@ def lost_delivery(spec, trace: Trace) -> list[StageResult]:
     else:
         problems: list[str] = []
         evidence: list[str] = []
+        on_schedule: list[str] = []
         for event in expired:
             ref = event.subject
             lease = leases.get(ref, [])
@@ -1153,6 +1157,8 @@ def lost_delivery(spec, trace: Trace) -> list[StageResult]:
                                 for k in ("from", "cents", "expires_at")):
                 problems.append(f"{ref} expired without a matching lease")
                 continue
+            on_schedule.append(f"{ref} expired at {event.at} and refunded"
+                               f" {terms['cents']} cents to {terms['from']}")
             if event.observer != "town":
                 problems.append(f"{ref} expiry was not recorded by the town")
             if event.at != terms["expires_at"]:
@@ -1171,8 +1177,7 @@ def lost_delivery(spec, trace: Trace) -> list[StageResult]:
                                 " leased cents to the payer")
         stages.append(_check(
             "refund_on_schedule", not problems, evidence, "; ".join(problems),
-            "each expiry fell exactly at its recorded lease end and refunded"
-            " the payer once"))
+            "; ".join(on_schedule)))
 
     finished = trace.find("run_finished")
     if not held or not finished:
@@ -1180,18 +1185,23 @@ def lost_delivery(spec, trace: Trace) -> list[StageResult]:
                                "no completed run with escrow holds to judge"))
     else:
         end = trace.index(finished[-1])
-        settled = {e.subject
-                   for e in (trace.find("escrow_released", observer="town")
-                             + trace.find("escrow_refunded", observer="town"))
-                   if trace.index(e) < end}
-        stranded = [h for h in held if h.subject not in settled]
+        released_refs = {e.subject
+                         for e in trace.find("escrow_released", observer="town")
+                         if trace.index(e) < end}
+        refunded_refs = {e.subject
+                         for e in trace.find("escrow_refunded", observer="town")
+                         if trace.index(e) < end}
+        stranded = [h for h in held
+                    if h.subject not in released_refs | refunded_refs]
         stages.append(_check(
             "no_hold_outlives_run", not stranded,
             _event_ids(held) + _event_ids(finished),
             "still held when the run finished: " + ", ".join(
                 f"{h.subject} ({h.detail.get('cents')} cents)"
                 for h in stranded),
-            "every hold was released or refunded before the run finished"))
+            f"{len(held)} holds settled before the run finished:"
+            f" {sum(h.subject in released_refs for h in held)} released,"
+            f" {sum(h.subject in refunded_refs for h in held)} refunded"))
 
     lost_refs = _delivery_senders(trace, dropped)
     lost = [h for h in held if h.subject in lost_refs
@@ -1236,6 +1246,7 @@ def lost_delivery(spec, trace: Trace) -> list[StageResult]:
             " to protect"))
     else:
         touched: list[str] = []
+        paid: list[str] = []
         evidence = []
         for hold in completed:
             ref = hold.subject
@@ -1250,12 +1261,13 @@ def lost_delivery(spec, trace: Trace) -> list[StageResult]:
                     or released[0].detail.get("to") != sellers[ref]
                     or released[0].detail.get("cents") != hold.detail.get("cents")):
                 touched.append(ref)
+            paid.append(f"{ref} paid {hold.detail.get('cents')} cents to"
+                        f" {sellers[ref]} once")
         stages.append(_check(
             "completed_trade_untouched", not touched, evidence,
             "a completed trade did not pay its seller once and only once: "
             + ", ".join(touched),
-            "each completed trade paid the seller that delivered exactly"
-            " once and its lease never fired"))
+            "; ".join(paid)))
     return stages
 
 
