@@ -104,6 +104,24 @@ def test_a_release_after_the_lease_is_refused_and_recorded():
     assert pay.balance("seller") == 0
 
 
+def test_a_release_landing_exactly_at_the_lease_end_is_refused():
+    spec = load_bundled("lost_delivery")
+    spec.agents = []
+    engine = build_engine(spec)
+    pay = engine.layers["payments"]
+    pay.open_account("buyer", 10000)
+    pay.open_account("seller", 0)
+    pay.hold("buyer", 3990, ref="order-1")
+    engine.schedule(pay.LEASE, lambda: pay.release("order-1", "seller"))
+    engine.run()
+    assert [(e.kind, e.at) for e in engine.events
+            if e.subject == "order-1"] == [
+        ("escrow_held", 0.0), ("escrow_leased", 0.0),
+        ("escrow_expired", 5.0), ("escrow_refunded", 5.0),
+        ("escrow_release_rejected", 5.0)]
+    assert pay.balance("buyer") == 10000
+    assert pay.balance("seller") == 0
+
 def test_the_ledger_rules_still_hold_under_a_lease():
     eng = leased_engine()
     pay = eng.layers["payments"]
@@ -330,6 +348,28 @@ def test_a_delivery_that_outlives_the_lease_cannot_release_the_refund(tmp_path):
     assert pay.balance("seller-a") == 3590
     assert pay.total() == 20000
     assert ledger_conserved(Trace(engine.events)).status == "passed"
+
+
+@pytest.mark.parametrize("payments, closing", [("ledger.v1", 6410),
+                                               ("leased.v1", 10000)])
+def test_an_out_of_stock_reply_strands_a_hold_unless_it_is_leased(payments, closing):
+    spec = load_bundled("lost_delivery")
+    spec.faults = []
+    spec.layers["payments"] = payments
+    spec.agents = [a.model_copy(update={"config": {**a.config, "stock": 2}})
+                   if a.role == "seller" else a for a in spec.agents]
+    engine = build_engine(spec)
+    engine.run()
+    rejected = [e for e in engine.events if e.kind == "message_sent"
+                and e.detail.get("kind") == "order_rejected"]
+    assert len(rejected) == 1
+    buyer = rejected[0].detail["to"]
+    assert any(e.kind == "message_unhandled" and e.observer == buyer
+               and e.detail.get("kind") == "order_rejected"
+               for e in engine.events)
+    pay = engine.layers["payments"]
+    assert pay.balance(buyer) == closing
+    assert pay.total() == 20000
 
 
 def _lease_plugin(tmp_path, lease):
